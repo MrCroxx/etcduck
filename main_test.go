@@ -52,29 +52,28 @@ func TestMutex(t *testing.T) {
 
 				fakesum++
 
-				// t.Logf("create mutex object")
+				t.Logf("create mutex object")
 				m, err := concurrency.NewMutex(client, "sum")
 				if err != nil {
 					t.Fatal(err)
 				}
-				// t.Logf("mutex <%s> on <%s> created", m.Key(), m.Resource())
+				t.Logf("mutex <%s> on <%s> created", m.Key(), m.Resource())
 
-				// t.Logf("acquire lock on <%s>", m.Resource())
+				t.Logf("acquire lock on <%s>", m.Resource())
 				err = m.Lock(context.TODO(), 0)
 				if err != nil {
 					t.Fatal(err)
 				}
-				// t.Logf("lock <%s> on <%s> acquired", m.Key(), m.Resource())
+				t.Logf("lock <%s> on <%s> acquired", m.Key(), m.Resource())
 
 				sum++
 
-				// t.Logf("release lock on <%s>", m.Resource())
+				t.Logf("release lock on <%s>", m.Resource())
 				err = m.Unlock(context.TODO())
 				if err != nil {
 					t.Fatal(err)
 				}
-				// t.Logf("lock <%s> on <%s> released", m.Key(), m.Resource())
-				t.Logf("done <%d>", i)
+				t.Logf("lock <%s> on <%s> released", m.Key(), m.Resource())
 			}(i)
 		}
 		wg.Wait()

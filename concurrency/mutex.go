@@ -3,7 +3,6 @@ package concurrency
 import (
 	"context"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +21,9 @@ type Mutex interface {
 	// Unlock releases the distribited lock.
 	// If the distributed lock does not exist, return error.
 	Unlock(ctx context.Context) error
+	// Resource returns the resource held by Mutex.
 	Resource() string
+	// Key returns the key of Mutex.
 	Key() string
 }
 
@@ -71,7 +72,6 @@ func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
 		if !r.Succeeded {
 			return fmt.Errorf("mutex is not reentrant")
 		}
-		log.Printf("key:%s rev:%d", m.key, r.Header.Revision)
 		return m.waitMutex(cctx, r.Header.Revision-1)
 	}):
 		return err
@@ -94,25 +94,6 @@ func (m *mutex) Resource() string {
 func (m *mutex) Key() string {
 	return m.key
 }
-
-// func (m *mutex) waitMutex(ctx context.Context, maxCreateRev int64) error {
-// 	c := m.s.Client()
-
-// 	getOpts := append(v3.WithLastCreate(), v3.WithMaxCreateRev(maxCreateRev))
-// 	for {
-// 		r, err := c.Get(context.TODO(), m.res, getOpts...)
-// 		if err != nil {
-// 			return err
-// 		}
-// 		if len(r.Kvs) == 0 {
-// 			return nil
-// 		}
-// 		latest := string(r.Kvs[0].Key)
-// 		if err = m.waitMutexDelete(ctx, latest, r.Header.Revision); err != nil {
-// 			return err
-// 		}
-// 	}
-// }
 
 func (m *mutex) waitMutex(ctx context.Context, maxCreateRev int64) error {
 	cctx, cancel := context.WithCancel(ctx)
@@ -142,31 +123,7 @@ func (m *mutex) waitMutex(ctx context.Context, maxCreateRev int64) error {
 	}
 }
 
-// func (m *mutex) waitMutexDelete(ctx context.Context, key string, rev int64) error {
-// 	cctx, cancel := context.WithCancel(ctx)
-// 	defer cancel()
-
-// 	c := m.s.Client()
-// 	var wr v3.WatchResponse
-// 	w := c.Watch(context.TODO(), key, v3.WithRev(rev))
-// 	for wr = range w {
-// 		for _, ev := range wr.Events {
-// 			if ev.Type == mvccpb.DELETE {
-// 				return nil
-// 			}
-// 		}
-// 	}
-// 	if err := wr.Err(); err != nil {
-// 		return err
-// 	}
-// 	if err := ctx.Err(); err != nil {
-// 		return err
-// 	}
-// 	return fmt.Errorf("lost watcher waiting for delete")
-// }
-
 func (m *mutex) waitMutexDelete(ctx context.Context, key string, rev int64) error {
-	log.Printf("wait delete key:%s rev:%d", key, rev)
 	w := m.s.Client().Watch(context.TODO(), key, v3.WithRev(rev))
 	// func returns in loop
 	for {
@@ -193,74 +150,3 @@ func (m *mutex) waitMutexDelete(ctx context.Context, key string, rev int64) erro
 		}
 	}
 }
-
-// func (m *mutex) waitMutexC(ctx context.Context, maxCreateRev int64, done <-chan struct{}) <-chan error {
-// 	ch := make(chan error)
-
-// 	go func() {
-// 		getOpts := append(v3.WithLastCreate(), v3.WithMaxCreateRev(maxCreateRev))
-// 		for {
-// 			// get the latest key to watch
-// 			r, err := m.s.Client().Get(context.TODO(), m.res, getOpts...)
-// 			if err != nil {
-// 				ch <- err
-// 				return
-// 			}
-// 			// no key to wait
-// 			if len(r.Kvs) == 0 {
-// 				ch <- nil
-// 				return
-// 			}
-// 			// watch the latest key
-// 			latest := string(r.Kvs[0].Key)
-// 			select {
-// 			// receive done signal, return
-// 			case <-done:
-// 				return
-// 			case err
-// 			}
-// 		}
-
-// 	}()
-
-// 	return ch
-// }
-
-// func (m *mutex) waitMutexDelete(ctx context.Context, key string, rev int64, done <-chan struct{}) <-chan error {
-// 	cctx, cancel := context.WithCancel(ctx)
-// 	ch := make(chan error)
-// 	// watch key delete and done signal
-// 	go func() {
-// 		w := m.s.Client().Watch(cctx, key, v3.WithRev(rev))
-// 		defer cancel()
-// 		for {
-// 			select {
-// 			// receive done signal, return
-// 			case <-done:
-// 				return
-// 			case wr, ok := <-w:
-// 				if ok {
-// 					for _, ent := range wr.Events {
-// 						if ent.Type == mvccpb.DELETE {
-// 							// receive delete, return and write ch
-// 							ch <- nil
-// 							return
-// 						}
-// 					}
-// 				}
-// 				// if not ok, watch channel is closed unexpectedly
-// 				if err := wr.Err(); err != nil {
-// 					ch <- err
-// 					return
-// 				}
-// 				if err := ctx.Err(); err != nil {
-// 					ch <- err
-// 					return
-// 				}
-// 				ch <- fmt.Errorf("lost watcher waiting for delete")
-// 				return
-// 			}
-// 		}
-// 	}()
-// 	return ch
-// }
