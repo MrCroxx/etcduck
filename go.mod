@@ -1,4 +1,4 @@
-module github.com/MrCroxx/etcdance
+module github.com/MrCroxx/etcduck
 
 go 1.15
 
@@ -9,6 +9,7 @@ require (
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/google/uuid v1.1.2 // indirect
 	github.com/sirupsen/logrus v1.4.2
+	github.com/stretchr/testify v1.3.0
 	go.etcd.io/etcd v3.3.25+incompatible
 	google.golang.org/grpc v1.33.2 // indirect
 )
