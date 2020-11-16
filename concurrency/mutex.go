@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MrCroxx/etcduck/session"
@@ -23,33 +24,38 @@ type Mutex interface {
 	// Resource returns the resource held by Mutex.
 	Resource() string
 	// Key returns the key of Mutex.
+	// Returns empty string before locking.
 	Key() string
 }
 
 type mutex struct {
-	s   session.Session
-	res string
-	key string
+	s      session.Session
+	opts   *options
+	res    string
+	key    string
+	client *v3.Client
+	mu     sync.Mutex
 }
 
 // NewMutex returns a new Mutex on the resource.
-// Note that NewMutex will create a new session with lease,
+// Note that NewMutex will not create a new session with lease,
+// the leased session will be created when locking,
 // the key based on both leaseID and resource.
 func NewMutex(client *v3.Client, resource string, options ...Option) (Mutex, error) {
 	opts := defaultOptions()
 	for _, option := range options {
 		option(opts)
 	}
-	s, err := session.NewSession(client, session.WithTTL(opts.leaseTimeout))
-	if err != nil || s == nil {
-		return nil, err
-	}
 	res := strings.Join([]string{prefix, "mutex", resource}, ":")
-	key := strings.Join([]string{res, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
-	return &mutex{s: s, res: res, key: key}, nil
+	return &mutex{s: nil, opts: opts, client: client, res: res, key: ""}, nil
 }
 
 func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
+	err := m.acquireSessionAndKey()
+	if err != nil {
+		return err
+	}
+
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -83,8 +89,12 @@ func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
 }
 
 func (m *mutex) Unlock(ctx context.Context) error {
+	defer m.releaseSessionAndKey()
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if m.s == nil {
+		return fmt.Errorf("mutex is not holding a leased session, may be not locked yet")
+	}
 	if _, err := m.s.Client().Delete(cctx, m.key); err != nil {
 		return err
 	}
@@ -97,6 +107,35 @@ func (m *mutex) Resource() string {
 
 func (m *mutex) Key() string {
 	return m.key
+}
+
+func (m *mutex) acquireSessionAndKey() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.s != nil {
+		return nil
+	}
+	s, err := session.NewSession(m.client, session.WithTTL(m.opts.leaseTimeout))
+	if err != nil || s == nil {
+		return err
+	}
+	m.s = s
+	m.key = strings.Join([]string{m.res, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
+	return nil
+}
+
+func (m *mutex) releaseSessionAndKey() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.s == nil {
+		return nil
+	}
+	err := m.s.Close()
+	m.s = nil
+	m.key = ""
+	return err
 }
 
 func (m *mutex) waitMutex(ctx context.Context, maxCreateRev int64) error {

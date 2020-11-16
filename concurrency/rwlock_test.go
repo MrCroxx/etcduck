@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -10,8 +11,7 @@ import (
 	v3 "go.etcd.io/etcd/clientv3"
 )
 
-func TestRWLock(t *testing.T) {
-	// TODO : tests here is for mutex, replace it
+func TestRWLockSum(t *testing.T) {
 	assert := assert.New(t)
 
 	client, err := v3.New(v3.Config{
@@ -22,11 +22,13 @@ func TestRWLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	target := 100
+
 	for {
 
 		sum := 0
 		fakesum := 0
-		target := 500
+		target *= 2
 		var wg sync.WaitGroup
 
 		for i := 0; i < target; i++ {
@@ -36,19 +38,19 @@ func TestRWLock(t *testing.T) {
 
 				fakesum++
 
-				t.Logf("create mutex object")
-				m, err := NewMutex(client, "sum")
+				t.Logf("create rwlock object")
+				m, err := NewRWLock(client, "sum")
 				if err != nil {
 					t.Fatal(err)
 				}
-				t.Logf("mutex <%s> on <%s> created", m.Key(), m.Resource())
 
 				t.Logf("acquire lock on <%s>", m.Resource())
 				err = m.Lock(context.TODO(), 0)
 				if err != nil {
 					t.Fatal(err)
 				}
-				t.Logf("lock <%s> on <%s> acquired", m.Key(), m.Resource())
+				key := fmt.Sprintf("%s/%s", m.RKey(), m.WKey())
+				t.Logf("lock <%s> on <%s> acquired", key, m.Resource())
 
 				sum++
 
@@ -57,7 +59,7 @@ func TestRWLock(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				t.Logf("lock <%s> on <%s> released", m.Key(), m.Resource())
+				t.Logf("lock <%s> on <%s> released", key, m.Resource())
 			}(i)
 		}
 		wg.Wait()
@@ -69,4 +71,45 @@ func TestRWLock(t *testing.T) {
 		t.Logf("<sum> equals <fakesum>, need another loop to assert")
 	}
 
+}
+
+func TestRWLockReentrant(t *testing.T) {
+
+	assert := assert.New(t)
+
+	client, err := v3.New(v3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: time.Minute * 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := NewRWLock(client, "reentrant")
+
+	err = m.Lock(context.TODO(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("acquired rwlock.lock once, go on acquiring")
+	err = m.Lock(context.TODO(), 0)
+	assert.Errorf(err, "rwlock.Lock is supposed to return an error when called reentrantly")
+}
+
+func TestRWLockDirectlyUnlock(t *testing.T) {
+
+	assert := assert.New(t)
+
+	client, err := v3.New(v3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: time.Minute * 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := NewRWLock(client, "reentrant")
+
+	err = m.Unlock(context.TODO())
+	assert.Errorf(err, "rwlock.Lock is supposed to return an error when called reentrantly")
 }

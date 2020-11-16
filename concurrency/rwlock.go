@@ -5,49 +5,70 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MrCroxx/etcduck/session"
 	v3 "go.etcd.io/etcd/clientv3"
 )
 
+// RWLock is a distributed read-write lock.
 type RWLock interface {
+	// RLock acquires a distributed read lock.
+	// If timeout is set to be 0, the method will be blocked until acquiring succeeds.
 	RLock(ctx context.Context, timeout time.Duration) error
+	// Lock acquires a distributed write lock.
+	// If timeout is set to be 0, the method will be blocked until acquiring succeeds.
+	// Note that RWLock.Lock is not reentrant.
 	Lock(ctx context.Context, timeout time.Duration) error
+	// Unlock releases the distribited lock.
+	// If the distributed lock does not exist, return error.
 	Unlock(ctx context.Context) error
+	// Resource returns the resource held by Mutex.
 	Resource() string
+	// Key returns the read key of RWLock.
+	// Returns empty string before locking.
 	RKey() string
+	// Key returns the write key of RWLock.
+	// Returns empty string before locking.
 	WKey() string
 }
 
 type rwlock struct {
-	s    session.Session
-	res  string
-	rres string
-	wres string
-	rkey string
-	wkey string
+	s      session.Session
+	opts   *options
+	client *v3.Client
+	res    string
+	rres   string
+	wres   string
+	rkey   string
+	wkey   string
+	mu     sync.Mutex
 }
 
+// NewRWLock returns a new RWLock on the resource.
+// Note that RWLock will not create a new session with lease,
+// the leased session will be created when locking,
+// the key based on both leaseID and resource.
 func NewRWLock(client *v3.Client, resource string, options ...Option) (RWLock, error) {
 	opts := defaultOptions()
 	for _, option := range options {
 		option(opts)
 	}
-	s, err := session.NewSession(client, session.WithTTL(opts.leaseTimeout))
-	if err != nil || s == nil {
-		return nil, err
-	}
+
 	res := strings.Join([]string{prefix, "rwlock", resource}, ":")
 	rres := strings.Join([]string{res, "r"}, ":")
 	wres := strings.Join([]string{res, "w"}, ":")
 
-	rkey := strings.Join([]string{rres, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
-	wkey := strings.Join([]string{wres, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
-	return &rwlock{s: s, res: res, rres: rres, wres: wres, rkey: rkey, wkey: wkey}, nil
+	return &rwlock{s: nil, opts: opts, client: client, res: res, rres: rres, wres: wres, rkey: "", wkey: ""}, nil
 }
 
 func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) error {
+	err := rw.acquireSessionAndKey()
+	if err != nil {
+		return err
+	}
+
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -87,6 +108,11 @@ func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) error {
 }
 
 func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) error {
+	err := rw.acquireSessionAndKey()
+	if err != nil {
+		return err
+	}
+
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -100,7 +126,7 @@ func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) error {
 		// return true if rkey doesn't exist
 		cmp := v3.Compare(v3.CreateRevision(rw.wkey), "=", 0)
 		// put rkey to etcd with lease
-		put := v3.OpPut(rw.rkey, "", v3.WithLease(rw.s.Lease()))
+		put := v3.OpPut(rw.wkey, "", v3.WithLease(rw.s.Lease()))
 		// commit txn
 		r, err := rw.s.Client().Txn(cctx).
 			If(cmp).
@@ -120,8 +146,12 @@ func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) error {
 }
 
 func (rw *rwlock) Unlock(ctx context.Context) error {
+	defer rw.releaseSessionAndKey()
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if rw.s == nil {
+		return fmt.Errorf("rwlock is not holding a leased session, may be not locked yet")
+	}
 	if _, err := rw.s.Client().Delete(cctx, rw.rkey); err != nil {
 		return err
 	}
@@ -140,6 +170,37 @@ func (rw *rwlock) RKey() string {
 }
 func (rw *rwlock) WKey() string {
 	return rw.wkey
+}
+
+func (rw *rwlock) acquireSessionAndKey() error {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	if rw.s != nil {
+		return nil
+	}
+	s, err := session.NewSession(rw.client, session.WithTTL(rw.opts.leaseTimeout))
+	if err != nil || s == nil {
+		return err
+	}
+	rw.s = s
+	rw.rkey = strings.Join([]string{rw.rres, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
+	rw.wkey = strings.Join([]string{rw.wres, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
+	return nil
+}
+
+func (rw *rwlock) releaseSessionAndKey() error {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	if rw.s == nil {
+		return nil
+	}
+	err := rw.s.Close()
+	rw.s = nil
+	rw.rkey = ""
+	rw.wkey = ""
+	return err
 }
 
 func (rw *rwlock) waitWKeysDelete(ctx context.Context, maxCreateRev int64) error {
