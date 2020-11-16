@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MrCroxx/etcduck/session"
 	v3 "go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/mvcc/mvccpb"
 )
 
 // Mutex is a distributed mutex lock.
@@ -24,29 +24,38 @@ type Mutex interface {
 	// Resource returns the resource held by Mutex.
 	Resource() string
 	// Key returns the key of Mutex.
+	// Returns empty string before locking.
 	Key() string
 }
 
 type mutex struct {
-	s   session.Session
-	res string
-	key string
+	s      session.Session
+	opts   *options
+	res    string
+	key    string
+	client *v3.Client
+	mu     sync.Mutex
 }
 
 // NewMutex returns a new Mutex on the resource.
-// Note that NewMutex will create a new session with lease,
+// Note that NewMutex will not create a new session with lease,
+// the leased session will be created when locking,
 // the key based on both leaseID and resource.
-func NewMutex(client *v3.Client, resource string) (Mutex, error) {
-	s, err := session.NewSession(client, session.WithTTL(3))
-	if err != nil || s == nil {
-		return nil, err
+func NewMutex(client *v3.Client, resource string, options ...Option) (Mutex, error) {
+	opts := defaultOptions()
+	for _, option := range options {
+		option(opts)
 	}
 	res := strings.Join([]string{prefix, "mutex", resource}, ":")
-	key := strings.Join([]string{res, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
-	return &mutex{s: s, res: res, key: key}, nil
+	return &mutex{s: nil, opts: opts, client: client, res: res, key: ""}, nil
 }
 
 func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
+	err := m.acquireSessionAndKey()
+	if err != nil {
+		return err
+	}
+
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -61,7 +70,7 @@ func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
 		cmp := v3.Compare(v3.CreateRevision(m.key), "=", 0)
 		// put key to etcd with lease
 		put := v3.OpPut(m.key, "", v3.WithLease(m.s.Lease()))
-		// get
+		// commit txn
 		r, err := m.s.Client().Txn(cctx).
 			If(cmp).
 			Then(put).
@@ -72,6 +81,7 @@ func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
 		if !r.Succeeded {
 			return fmt.Errorf("mutex is not reentrant")
 		}
+		// wait for the keys before this to be deleted
 		return m.waitMutex(cctx, r.Header.Revision-1)
 	}):
 		return err
@@ -79,8 +89,12 @@ func (m *mutex) Lock(ctx context.Context, timeout time.Duration) error {
 }
 
 func (m *mutex) Unlock(ctx context.Context) error {
+	defer m.releaseSessionAndKey()
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if m.s == nil {
+		return fmt.Errorf("mutex is not holding a leased session, may be not locked yet")
+	}
 	if _, err := m.s.Client().Delete(cctx, m.key); err != nil {
 		return err
 	}
@@ -93,6 +107,35 @@ func (m *mutex) Resource() string {
 
 func (m *mutex) Key() string {
 	return m.key
+}
+
+func (m *mutex) acquireSessionAndKey() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.s != nil {
+		return nil
+	}
+	s, err := session.NewSession(m.client, session.WithTTL(m.opts.leaseTimeout))
+	if err != nil || s == nil {
+		return err
+	}
+	m.s = s
+	m.key = strings.Join([]string{m.res, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
+	return nil
+}
+
+func (m *mutex) releaseSessionAndKey() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.s == nil {
+		return nil
+	}
+	err := m.s.Close()
+	m.s = nil
+	m.key = ""
+	return err
 }
 
 func (m *mutex) waitMutex(ctx context.Context, maxCreateRev int64) error {
@@ -113,40 +156,12 @@ func (m *mutex) waitMutex(ctx context.Context, maxCreateRev int64) error {
 		// receive done signal, return
 		case <-ctx.Done():
 			return ctx.Err()
-		case err := <-waitError(func() error { return m.waitMutexDelete(cctx, latest, r.Header.Revision) }):
+		case err := <-waitError(func() error { return waitKeyDelete(cctx, m.s.Client(), latest, r.Header.Revision) }):
 			// receive error, return
 			if err != nil {
 				return err
 			}
 			// deleted, watch the next latest key
-		}
-	}
-}
-
-func (m *mutex) waitMutexDelete(ctx context.Context, key string, rev int64) error {
-	w := m.s.Client().Watch(context.TODO(), key, v3.WithRev(rev))
-	// func returns in loop
-	for {
-		select {
-		// receive done signal, return
-		case <-ctx.Done():
-			return ctx.Err()
-		// receive watch response
-		case wr, ok := <-w:
-			// if not ok, watch channel has been closed unexpectedly, return error
-			if !ok {
-				if err := wr.Err(); err != nil {
-					return err
-				}
-				return fmt.Errorf("lost watcher waiting for delete")
-			}
-			for _, ev := range wr.Events {
-				// receive DELETE signal, return
-				if ev.Type == mvccpb.DELETE {
-					return nil
-				}
-			}
-			// not receive DELETE signal, continue
 		}
 	}
 }
