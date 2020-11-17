@@ -16,22 +16,36 @@ import (
 type RWLock interface {
 	// RLock acquires a distributed read lock.
 	// If timeout is set to be 0, the method will be blocked until acquiring succeeds.
-	RLock(ctx context.Context, timeout time.Duration) error
+	RLock(ctx context.Context, timeout time.Duration) (*RWLockInfo, error)
 	// Lock acquires a distributed write lock.
 	// If timeout is set to be 0, the method will be blocked until acquiring succeeds.
 	// Note that RWLock.Lock is not reentrant.
-	Lock(ctx context.Context, timeout time.Duration) error
+	Lock(ctx context.Context, timeout time.Duration) (*RWLockInfo, error)
 	// Unlock releases the distribited lock.
 	// If the distributed lock does not exist, return error.
 	Unlock(ctx context.Context) error
-	// Resource returns the resource held by Mutex.
-	Resource() string
-	// Key returns the read key of RWLock.
-	// Returns empty string before locking.
-	RKey() string
-	// Key returns the write key of RWLock.
-	// Returns empty string before locking.
-	WKey() string
+	// // Resource returns the resource held by RWLock.
+	// Resource() string
+	// // Key returns the read key of RWLock.
+	// // Returns empty string before locking.
+	// RKey() string
+	// // Key returns the write key of RWLock.
+	// // Returns empty string before locking.
+	// WKey() string
+}
+
+// RWLockInfo is the information of the acquired RWLock.
+type RWLockInfo struct {
+	// LeaseID is the lease id of the session held by RWLock.
+	LeaseID v3.LeaseID
+	// Resource is the resource held by RWLock.
+	Resource string
+	// Key is the read key of RWLock.
+	RKey string
+	// Key is the write key of RWLock.
+	WKey string
+	// Done will close while the session held by RWLock finishes or breaks.
+	Done <-chan struct{}
 }
 
 type rwlock struct {
@@ -43,6 +57,7 @@ type rwlock struct {
 	wres   string
 	rkey   string
 	wkey   string
+	done   <-chan struct{}
 	mu     sync.Mutex
 }
 
@@ -63,10 +78,10 @@ func NewRWLock(client *v3.Client, resource string, options ...Option) (RWLock, e
 	return &rwlock{s: nil, opts: opts, client: client, res: res, rres: rres, wres: wres, rkey: "", wkey: ""}, nil
 }
 
-func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) error {
+func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) (*RWLockInfo, error) {
 	err := rw.acquireSessionAndKey()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cctx, cancel := context.WithCancel(ctx)
@@ -77,7 +92,7 @@ func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) error {
 	}
 	select {
 	case <-time.After(timeout):
-		return timeoutError(timeout)
+		return nil, timeoutError(timeout)
 	case err := <-waitError(func() error {
 		// return true if rkey doesn't exist
 		cmp := v3.Compare(v3.CreateRevision(rw.rkey), "=", 0)
@@ -103,14 +118,20 @@ func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) error {
 		// wait for the wkeys before this to be deleted
 		return rw.waitWKeysDelete(cctx, rev)
 	}):
-		return err
+		return &RWLockInfo{
+			LeaseID:  rw.s.Lease(),
+			Resource: rw.res,
+			RKey:     rw.rkey,
+			WKey:     rw.wkey,
+			Done:     rw.done,
+		}, err
 	}
 }
 
-func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) error {
+func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) (*RWLockInfo, error) {
 	err := rw.acquireSessionAndKey()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cctx, cancel := context.WithCancel(ctx)
@@ -121,7 +142,7 @@ func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) error {
 	}
 	select {
 	case <-time.After(timeout):
-		return timeoutError(timeout)
+		return nil, timeoutError(timeout)
 	case err := <-waitError(func() error {
 		// return true if rkey doesn't exist
 		cmp := v3.Compare(v3.CreateRevision(rw.wkey), "=", 0)
@@ -141,7 +162,13 @@ func (rw *rwlock) Lock(ctx context.Context, timeout time.Duration) error {
 		// wait for the wkeys before this to be deleted
 		return rw.waitRWKeysDelete(cctx, r.Header.Revision-1)
 	}):
-		return err
+		return &RWLockInfo{
+			LeaseID:  rw.s.Lease(),
+			Resource: rw.res,
+			RKey:     rw.rkey,
+			WKey:     rw.wkey,
+			Done:     rw.done,
+		}, err
 	}
 }
 
@@ -161,17 +188,6 @@ func (rw *rwlock) Unlock(ctx context.Context) error {
 	return nil
 }
 
-func (rw *rwlock) Resource() string {
-	return rw.res
-}
-
-func (rw *rwlock) RKey() string {
-	return rw.rkey
-}
-func (rw *rwlock) WKey() string {
-	return rw.wkey
-}
-
 func (rw *rwlock) acquireSessionAndKey() error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
@@ -179,11 +195,15 @@ func (rw *rwlock) acquireSessionAndKey() error {
 	if rw.s != nil {
 		return nil
 	}
-	s, err := session.NewSession(rw.client, session.WithTTL(rw.opts.leaseTimeout))
+	sessionOpts := append([]session.Option{},
+		session.WithTTL(rw.opts.leaseTimeout), session.WithLease(rw.opts.leaseID),
+	)
+	s, err := session.NewSession(rw.client, sessionOpts...)
 	if err != nil || s == nil {
 		return err
 	}
 	rw.s = s
+	rw.done = s.Done()
 	rw.rkey = strings.Join([]string{rw.rres, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
 	rw.wkey = strings.Join([]string{rw.wres, strconv.FormatInt(int64(s.Lease()), 10)}, ":")
 	return nil
