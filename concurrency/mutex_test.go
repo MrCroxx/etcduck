@@ -112,3 +112,47 @@ func TestMutexDirectlyUnlock(t *testing.T) {
 	err = m.Unlock(context.TODO())
 	assert.Errorf(err, "mutex.Lock is supposed to return an error when called reentrantly")
 }
+
+func TestMutexTimeout(t *testing.T) {
+	assert := assert.New(t)
+
+	client, err := v3.New(v3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: time.Minute * 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1, err := NewRWLock(client, "to")
+	if err != nil || m1 == nil {
+		t.Fatal(err)
+	}
+	m2, err := NewRWLock(client, "to")
+	if err != nil || m2 == nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	ch := make(chan int)
+	wg.Add(1)
+
+	go func() {
+		if _, err := m1.Lock(context.TODO(), 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("m1 acquired mutex")
+		ch <- 0
+		wg.Done()
+	}()
+	wg.Add(1)
+	go func() {
+		<-ch
+		_, err := m2.Lock(context.TODO(), time.Second*3)
+		if err == nil {
+			t.Logf("m2 acquired mutex")
+		}
+		t.Log(err)
+		assert.Errorf(err, "expected timeout error")
+		wg.Done()
+	}()
+	wg.Wait()
+}
