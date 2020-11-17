@@ -16,6 +16,7 @@ import (
 type RWLock interface {
 	// RLock acquires a distributed read lock.
 	// If timeout is set to be 0, the method will be blocked until acquiring succeeds.
+	// Note that RWLock.RLock is not reentrant.
 	RLock(ctx context.Context, timeout time.Duration) (*RWLockInfo, error)
 	// Lock acquires a distributed write lock.
 	// If timeout is set to be 0, the method will be blocked until acquiring succeeds.
@@ -99,22 +100,26 @@ func (rw *rwlock) RLock(ctx context.Context, timeout time.Duration) (*RWLockInfo
 		// put rkey to etcd with lease
 		put := v3.OpPut(rw.rkey, "", v3.WithLease(rw.s.Lease()))
 		// get the existed rkey
-		get := v3.OpGet(rw.rkey)
+		// get := v3.OpGet(rw.rkey)
 		// commit txn
 		r, err := rw.s.Client().Txn(cctx).
 			If(cmp).
 			Then(put).
-			Else(get).
+			// Else(get).
 			Commit()
 		if err != nil || r == nil {
 			return err
 		}
 		var rev int64
-		if r.Succeeded {
-			rev = r.Header.Revision - 1
-		} else {
-			rev = r.Responses[0].GetResponseRange().Kvs[0].CreateRevision - 1
+		// if r.Succeeded {
+		// 	rev = r.Header.Revision - 1
+		// } else {
+		// 	rev = r.Responses[0].GetResponseRange().Kvs[0].CreateRevision - 1
+		// }
+		if !r.Succeeded {
+			return fmt.Errorf("rlock function in rwlock is not reentrant")
 		}
+		rev = r.Header.Revision - 1
 		// wait for the wkeys before this to be deleted
 		return rw.waitWKeysDelete(cctx, rev)
 	}):
