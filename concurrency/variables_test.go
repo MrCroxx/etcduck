@@ -1,21 +1,21 @@
 package concurrency
 
 import (
-	"math/rand"
 	"fmt"
+	"math/rand"
 	"time"
 )
 
 const (
-	wsl2host="172.31.248.121"
+	wsl2host = "172.31.77.150"
 )
 
 var (
 	endpoints = []string{
 		// wsl2
-		fmt.Sprintf("%s:%s",wsl2host,"2301"),
-		fmt.Sprintf("%s:%s",wsl2host,"2302"),
-		fmt.Sprintf("%s:%s",wsl2host,"2303"),
+		fmt.Sprintf("%s:%s", wsl2host, "2301"),
+		fmt.Sprintf("%s:%s", wsl2host, "2302"),
+		fmt.Sprintf("%s:%s", wsl2host, "2303"),
 		// Xiaomi
 		// "192.168.31.21:2301",
 		// "192.168.31.21:2302",
