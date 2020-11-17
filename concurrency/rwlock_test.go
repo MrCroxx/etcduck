@@ -113,4 +113,5 @@ func TestRWLockDirectlyUnlock(t *testing.T) {
 
 	err = rw.Unlock(context.TODO())
 	assert.Errorf(err, "rwlock.Lock is supposed to return an error when called reentrantly")
+
 }
